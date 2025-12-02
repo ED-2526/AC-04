@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import MinMaxScaler, PowerTransformer,StandardScaler
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, pairwise_distances
@@ -44,24 +44,45 @@ except FileNotFoundError:
 print("\n--- Preprocessing & Cleaning ---")
 
 # Feature Engineering: Crea noves variables a partir de les existents
-data['Age'] = 2025 - data['Year_Birth']  # Calcula l'edat dels clients
-data['Total_Spending'] = (data['MntWines'] + data['MntFruits'] + 
-                          data['MntMeatProducts'] + data['MntFishProducts'] + 
+data['Age'] = 2025 - data['Year_Birth'] # Calcula l'edat dels clients
+
+data['Total_Spending'] = (data['MntWines'] + data['MntFruits'] +
+                          data['MntMeatProducts'] + data['MntFishProducts'] +
                           data['MntSweetProducts'] + data['MntGoldProds'])
 # Suma totes les despeses en diferents categories de productes
 
+# Transformació de Categòriques a Numèriques (UNIFICADES)
+
+# Education: Mapeig Ordinal (1 a 5)
+education_map = {'Basic': 1, '2n Cycle': 2, 'Graduation': 3, 'Master': 4, 'PhD': 5}
+data['Education_Code'] = data['Education'].map(education_map)
+# Si hi ha algun valor nul o desconegut, l'omplim amb la moda o 0
+data['Education_Code'] = data['Education_Code'].fillna(0)
+
+# Marital Status: Codis numèrics (0, 1, 2...)
+data['Marital_Status_Code'] = data['Marital_Status'].astype('category').cat.codes
+
+# --- MODIFICACIÓ: Càlcul de Family_Size ---
+partner_status = ['Married', 'Together']
+data['Has_Partner'] = data['Marital_Status'].apply(lambda x: 1 if x in partner_status else 0)
+data['Family_Size'] = 1 + data['Has_Partner'] + data['Kidhome'] + data['Teenhome']
+# -------------------------------------------
+
 # Neteja de dades: elimina valors problemàtics
-data = data.dropna(subset=['Income'])  # Elimina files sense dades d'ingressos
-data = data[data['Age'] < 100]  # Elimina edats poc realistes (més de 100 anys)
-data = data[data['Income'] < 600000]  # Elimina ingressos extremadament alts (outliers)
+data = data.dropna(subset=['Income']) # Elimina files sense dades d'ingressos
+data = data[data['Age'] < 100] # Elimina edats poc realistes (més de 100 anys)
+data = data[data['Income'] < 600000] # Elimina ingressos extremadament alts (outliers)
 invalid_status = ['YOLO', 'Absurd', 'Alone']
-data = data[~data['Marital_Status'].isin(invalid_status)]  # Elimina estats civils invàlids
+data = data[~data['Marital_Status'].isin(invalid_status)] # Elimina estats civils invàlids
 
 # Selecció de variables per al clustering i escalat de dades
-numerical_cols = ['Age', 'Income', 'Total_Spending']  # Les tres variables que usarem
-X = data[numerical_cols].values  # Converteix a array de NumPy
-robust_scaler = RobustScaler()  # Escalador robust als outliers
-X_scaled = robust_scaler.fit_transform(X)  # Estandarditza les dades
+# --- MODIFICACIÓ: Afegim Family_Size a la llista ---
+numerical_cols = ['Age', 'Income', 'Total_Spending'] 
+# ---------------------------------------------------
+
+X = data[numerical_cols].values # Converteix a array de NumPy
+robust_scaler = MinMaxScaler() # Escalador robust als outliers
+X_scaled = robust_scaler.fit_transform(X) # Estandarditza les dades
 
 # --- 3. TROBAR K ÒPTIMA ---
 # Utilitza el mètode del colze per determinar el nombre òptim de clústers
@@ -72,9 +93,9 @@ model = KMeans(random_state=42, n_init=10)
 
 # Visualitzador del colze amb rang de K entre 2 i 10
 visualizer = KElbowVisualizer(
-    model, 
-    k=(2,10), 
-    metric='distortion',   # equivalent a inertia
+    model,
+    k=(2,10),
+    metric='distortion', # equivalent a inertia
     timings=False
 )
 
@@ -90,7 +111,6 @@ optimal_k = visualizer.elbow_value_
 print(f"K òptima trobada automàticament: {optimal_k}")
 
 
-
 # --- FUNCIÓ PER VISUALITZAR EN 2D ---
 def save_2d_plot(X, labels, title, filename, method='pca'):
     """
@@ -102,7 +122,6 @@ def save_2d_plot(X, labels, title, filename, method='pca'):
     - filename: nom del fitxer per guardar
     - method: 'pca' o 'tsne', segons l'algorisme que vulguis fer servir
     """
-    
     if method == 'pca':
         # Reducció de dimensions a 2D amb PCA
         pca = PCA(n_components=2)
@@ -133,9 +152,9 @@ print(f"\n--- Executant i Guardant Models (K={optimal_k}) ---")
 
 # 4.1 K-Means: mètode de partició que minimitza la distància als centroides
 print("Processant K-Means...")
-kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
-kmeans_labels = kmeans.fit_predict(X_scaled)  # Assigna cada punt a un clúster
-data['KMeans_Cluster'] = kmeans_labels  # Guarda les etiquetes al DataFrame
+kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=1)
+kmeans_labels = kmeans.fit_predict(X_scaled) # Assigna cada punt a un clúster
+data['KMeans_Cluster'] = kmeans_labels # Guarda les etiquetes al DataFrame
 save_2d_plot(X_scaled, kmeans_labels, f'K-Means 2D (K={optimal_k})', '01_kmeans_2d.png',method='tsne')
 save_2d_plot(X_scaled, kmeans_labels, f'K-Means 2D (K={optimal_k})', '01_kmeans_2d_PCA.png')
 
@@ -148,12 +167,21 @@ save_2d_plot(X_scaled, hierarchical_labels, f'Hierarchical 2D (K={optimal_k})', 
 save_2d_plot(X_scaled, hierarchical_labels, f'Hierarchical 2D (K={optimal_k})', '02_hierarchical_2d_PCA.png')
 
 # 4.3 GMM (Gaussian Mixture Model): model probabilístic amb distribucions gaussianes
-print("Processant GMM...")
+print("Processant GMM (amb PowerTransformer)...")
+
+# --- MODIFICACIÓ GMM: Transformació específica ---
+pt = PowerTransformer()
+X_gmm = pt.fit_transform(X) # Transformem X directament amb PowerTransformer
+# -------------------------------------------------
+
 gmm = GaussianMixture(n_components=optimal_k, random_state=42)
-gmm_labels = gmm.fit_predict(X_scaled)
+gmm_labels = gmm.fit_predict(X_gmm) # Entrenem amb les dades transformades per PowerTransformer
 data['GMM_Cluster'] = gmm_labels
-save_2d_plot(X_scaled, gmm_labels, f'GMM 2D (K={optimal_k})', '03_gmm_2d_PCA.png')
-save_2d_plot(X_scaled, gmm_labels, f'GMM 2D (K={optimal_k})', '03_gmm_2d.png', method='tsne')
+
+# Guardem els plots usant X_gmm (per veure com ha quedat l'espai transformat)
+save_2d_plot(X_gmm, gmm_labels, f'GMM 2D (K={optimal_k})', '03_gmm_2d_PCA.png')
+save_2d_plot(X_gmm, gmm_labels, f'GMM 2D (K={optimal_k})', '03_gmm_2d.png', method='tsne')
+
 
 # --- 6. CÀLCUL DE MÈTRIQUES (Imprimir per pantalla) ---
 def print_metrics(X, labels, name):
@@ -165,11 +193,10 @@ def print_metrics(X, labels, name):
     """
     # Calcula els centres de cada clúster
     centers = np.array([X[labels == i].mean(axis=0) for i in range(optimal_k)])
-    
     # SSE: suma de distàncies al quadrat dins de cada clúster (més baix = millor)
-    sse = 0 
+    sse = 0
     for i in range(optimal_k):
-        cluster_points = X[labels == i]  # Punts del clúster i
+        cluster_points = X[labels == i] # Punts del clúster i
         if len(cluster_points) > 0:
             sse += np.sum(cdist(cluster_points, [centers[i]], metric='euclidean')**2)
     
@@ -190,14 +217,13 @@ def print_metrics(X, labels, name):
     prox_mat = pairwise_distances(X_s)
     # Correlació de Pearson entre les dues matrius
     corr, _ = pearsonr(inc_mat.flatten(), prox_mat.flatten())
-    
     print(f"{name}: SSE(Cohesió)={sse:.2f}, BSS(Separació)={bss:.2f}, Correlació={corr:.4f}")
 
 # Imprimeix les mètriques per comparar els tres models
 print("\n--- Resum de Mètriques ---")
 print_metrics(X_scaled, kmeans_labels, "K-Means")
 print_metrics(X_scaled, hierarchical_labels, "Jeràrquic")
-print_metrics(X_scaled, gmm_labels, "GMM")
+print_metrics(X_gmm, gmm_labels, "GMM")
 
 # --- 7. GUARDAR CSV ---
 # Guarda el DataFrame amb les etiquetes dels clústers de tots els models
