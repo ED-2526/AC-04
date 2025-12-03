@@ -44,16 +44,19 @@ print(f"Data prepared. Shape: {X.shape}")
 
 # PCA analysis function
 def run_pca_analysis(X_input, scaler_name, n_components, column_names):
-    print(f"\n{'='*60}")
-    print(f"PCA ANALYSIS: {scaler_name.upper()}")
-    print(f"{'='*60}")
+    print(f"\n{'#'*60}")
+    print(f"ANALYSIS WITH {scaler_name.upper()}")
+    print(f"{'#'*60}")
 
     # Scale data
     scaler = MinMaxScaler() if scaler_name == 'minmax' else StandardScaler()
     X_scaled = scaler.fit_transform(X_input)
 
     # Standard deviation analysis
+    print(f"\n{'_'*20}")
     print(f"\nStandard Deviation ({scaler_name}):")
+    print(f"{'_'*20}")
+
     std_series = pd.Series(X_scaled.std(axis=0), index=column_names).sort_values(ascending=False)
     print(std_series.head(10))
 
@@ -82,6 +85,7 @@ def run_pca_analysis(X_input, scaler_name, n_components, column_names):
     print(f"\nScree plot saved: {img_file}")
 
     # PCA with specified components
+    
     n_comps = min(n_components, n_features)
     pca = PCA(n_components=n_comps)
     pca.fit(X_scaled)
@@ -92,8 +96,10 @@ def run_pca_analysis(X_input, scaler_name, n_components, column_names):
         columns=[f"PC{i+1}" for i in range(n_comps)],
         index=column_names
     )
+    print(f"\n{'_'*20}")
+    print(f"\nPCA Component Loadings ({scaler_name}):")
+    print(f"{'_'*20}")
     
-    print(f"\nComponent Loadings ({scaler_name.upper()}):")
     sorted_data = {}
 
     for i in range(n_comps):
@@ -101,6 +107,7 @@ def run_pca_analysis(X_input, scaler_name, n_components, column_names):
         sorted_series = loadings_df[pc_name].abs().sort_values(ascending=False)
         
         print(f"\n{pc_name}:")
+        print(f"{'_'*10}")
         print(sorted_series.head(6))
         
         original_values = loadings_df.loc[sorted_series.index, pc_name]
