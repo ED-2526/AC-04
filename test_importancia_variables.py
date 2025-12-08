@@ -5,44 +5,56 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
 import warnings
 import matplotlib
+import os
 
 matplotlib.use('Agg')
 warnings.filterwarnings('ignore')
 
-# Data loading
-print("Loading dataset...")
+# --- 1. DATA LOADING (DEL CSV PROCESSAT) ---
+print("Loading processed dataset...")
+
+# Ajusta el nom de la carpeta si és diferent, però al codi anterior era 'resultats_clustering'
+input_file = 'dades_processades_completes.csv'
+
 try:
-    data = pd.read_csv('marketing_campaign.csv', sep="\t")
-    print("Dataset loaded successfully!")
+    # Aquest fitxer ja el guardem separat per comes al codi principal
+    data = pd.read_csv(input_file, sep=",")
+    print(f"Dataset '{input_file}' loaded successfully!")
+    print(f"Shape: {data.shape}")
 except FileNotFoundError:
-    print("Error: File 'marketing_campaign.csv' not found.")
+    print(f"Error: File '{input_file}' not found. Assegura't d'haver executat el pas anterior.")
     exit()
 
-# Feature engineering
-print("\nPreprocessing data...")
-data['Age'] = 2025 - data['Year_Birth']
-data['Total_Spending'] = (
-    data['MntWines'] + data['MntFruits'] + data['MntMeatProducts'] +
-    data['MntFishProducts'] + data['MntSweetProducts'] + data['MntGoldProds']
-)
-data['Has_Partner'] = data['Marital_Status'].isin(['Married', 'Together']).astype(int)
-data['Family_Size'] = 1 + data['Has_Partner'] + data['Kidhome'] + data['Teenhome']
+# --- 2. PREPARACIÓ DE FEATURES ---
+# Com que el CSV ja té les dades netes i les variables creades (Age, Total_Spending, etc.),
+# només hem de seleccionar les columnes que volem analitzar.
 
-# Data cleaning
-data = data.dropna(subset=['Income'])
-data = data[data['Age'] < 100]
-data = data[data['Income'] < 600000]
-data = data[~data['Marital_Status'].isin(['YOLO', 'Absurd', 'Alone'])]
+selected_columns = [
+    "Age", 
+    "Total_Spending", 
+    "Income", 
+    "Family_Size", 
+    "Seniority_Code", 
+    "Education_Code", 
+    "Marital_Status_Code"
+]
 
-# Prepare features
-df_cat = pd.get_dummies(data[['Education', 'Marital_Status']], drop_first=True)
-df_features = pd.concat([data[["Age", "Total_Spending", "Income", "Family_Size"]], df_cat], axis=1)
+# Verifiquem que totes les columnes existeixin al CSV
+missing_cols = [col for col in selected_columns if col not in data.columns]
+if missing_cols:
+    print(f"Error: Falten aquestes columnes al CSV carregat: {missing_cols}")
+    exit()
+
+# Creem el DataFrame de features
+df_features = data[selected_columns]
+
 X = df_features.values
 cols = list(df_features.columns)
 
-print(f"Data prepared. Shape: {X.shape}")
+print(f"Data prepared for PCA. Shape: {X.shape}")
+print(f"Columns used: {cols}")
 
-# PCA analysis function
+# --- 3. PCA ANALYSIS FUNCTION (Igual que abans) ---
 def run_pca_analysis(X_input, scaler_name, n_components, column_names):
     print(f"\n{'#'*60}")
     print(f"ANALYSIS WITH {scaler_name.upper()}")
@@ -79,13 +91,12 @@ def run_pca_analysis(X_input, scaler_name, n_components, column_names):
     plt.xticks(components)
     plt.grid(axis='y', alpha=0.5)
     
-    img_file = f"scree_plot_{scaler_name}.png"
+    img_file = f"resultats_clustering/scree_plot_{scaler_name}_final.png"
     plt.savefig(img_file)
     plt.close()
     print(f"\nScree plot saved: {img_file}")
 
     # PCA with specified components
-    
     n_comps = min(n_components, n_features)
     pca = PCA(n_components=n_comps)
     pca.fit(X_scaled)
@@ -114,19 +125,11 @@ def run_pca_analysis(X_input, scaler_name, n_components, column_names):
         sorted_data[f"{pc_name}_Variable"] = sorted_series.index.tolist()
         sorted_data[f"{pc_name}_Value"] = original_values.tolist()
 
-    # Save results
-    csv_file = f"loadings_{scaler_name}.csv"
-    pd.DataFrame(sorted_data).to_csv(csv_file, index=False)
-    print(f"\nResults saved: {csv_file}")
 
     # Cumulative variance
     cumulative_var = pca.explained_variance_ratio_.cumsum()[-1] * 100
     print(f"\nCumulative variance with {n_comps} components: {cumulative_var:.2f}%")
 
-# Run analyses
-run_pca_analysis(X, 'minmax', n_components=7, column_names=cols)
-run_pca_analysis(X, 'standard', n_components=9, column_names=cols)
-
-print(f"\n{'='*60}")
-print("Analysis completed!")
-print(f"{'='*60}")
+# --- 4. RUN PCA ANALYSIS WITH BOTH SCALERS ---
+run_pca_analysis(X, 'minmax', n_components=4, column_names=cols)
+run_pca_analysis(X, 'standard', n_components=6, column_names=cols)
