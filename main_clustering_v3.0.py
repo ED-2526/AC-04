@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Sklearn & Stats
-from sklearn.preprocessing import MinMaxScaler, PowerTransformer
+from sklearn.preprocessing import MinMaxScaler, PowerTransformer, StandardScaler
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, pairwise_distances
@@ -54,8 +54,9 @@ data['Total_Spending'] = (
     data['MntMeatProducts'] + data['MntFishProducts'] +
     data['MntSweetProducts'] + data['MntGoldProds']
 )
-
+data['Log_Spending'] = np.log1p(data['Total_Spending'])
 # 2.2 Eliminació d'Outliers (Total_Spending)
+
 print("-> Eliminant outliers de Despesa...")
 Q1_spend = data['Total_Spending'].quantile(0.25)
 Q3_spend = data['Total_Spending'].quantile(0.75)
@@ -71,7 +72,7 @@ partner_status = ['Married', 'Together']
 data['Has_Partner'] = data['Marital_Status'].apply(lambda x: 1 if x in partner_status else 0)
 data['Family_Size'] = 1 + data['Has_Partner'] + data['Kidhome'] + data['Teenhome']
 
-# 2.4 Eliminació d'Outliers (Family_Size)
+"""# 2.4 Eliminació d'Outliers (Family_Size)
 print("-> Eliminant outliers de Mida Familiar...")
 Q1_fam = data['Family_Size'].quantile(0.25)
 Q3_fam = data['Family_Size'].quantile(0.75)
@@ -81,7 +82,7 @@ upper_bound_fam = Q3_fam + 1.5 * IQR_fam
 
 data = data[(data['Family_Size'] >= lower_bound_fam) & (data['Family_Size'] <= upper_bound_fam)]
 print(f"   Clients restants després de neteja: {len(data)}")
-
+"""
 # 2.5 Feature Engineering: Antiguitat (Seniority)
 data['Dt_Customer'] = pd.to_datetime(data['Dt_Customer'], dayfirst=True)
 max_date = data['Dt_Customer'].max()
@@ -89,10 +90,10 @@ data['Tenure_Days'] = (max_date - data['Dt_Customer']).dt.days
 
 data['Seniority'] = pd.cut(
     data['Tenure_Days'],
-    bins=[-np.inf, 365, 1825, np.inf],
-    labels=['Recent', 'Medium', 'Senior']
+    bins=[-np.inf, 365,np.inf],
+    labels=['Recent', 'Senior']
 )
-data['Seniority_Code'] = data['Seniority'].map({'Recent': 1, 'Medium': 2, 'Senior': 3})
+data['Seniority_Code'] = data['Seniority'].map({'Recent': 1, 'Senior': 2})
 print("\nDistribució Seniority:\n", data['Seniority_Code'].value_counts())
 
 # 2.6 Mapejos: Educació i Estat Civil
@@ -101,13 +102,7 @@ education_map = {'Basic': 1, '2n Cycle': 2, 'Graduation': 3, 'Master': 4, 'PhD':
 data['Education_Code'] = data['Education'].map(education_map).fillna(0)
 
 # Estat Civil (Agrupant Divorced/Widow/Single com a 3)
-marital_status_map = {
-    'Married': 1,
-    'Together': 2,
-    'Single': 3,
-    'Divorced': 3,
-    'Widow': 3
-}
+marital_status_map = {'Married': 1,'Together': 2,'Single': 3,'Divorced': 3,'Widow': 3}
 data['Marital_Status_Code'] = data['Marital_Status'].map(marital_status_map).fillna(0)
 
 # 2.7 Neteja Final de Valors Nuls i Absurds
@@ -117,6 +112,24 @@ data = data[data['Income'] < 600000]
 invalid_status = ['YOLO', 'Absurd', 'Alone']
 data = data[~data['Marital_Status'].isin(invalid_status)]
 
+# 2.8 Eliminació d'Outliers (Income) - NORMALITZACIÓ ESTADÍSTICA
+# Això elimina els punts que quedaven "flotant" al gràfic (els rics atípics)
+Q1_inc = data['Income'].quantile(0.25)
+Q3_inc = data['Income'].quantile(0.75)
+IQR_inc = Q3_inc - Q1_inc
+
+# Definim el límit superior
+upper_bound_inc = Q3_inc + 1.5 * IQR_inc
+# Comptem quants eliminem per informar
+outliers_inc = data[data['Income'] > upper_bound_inc]
+print(f"   Eliminats {len(outliers_inc)} clients amb ingressos anòmals (> {upper_bound_inc:.2f}€).")
+
+# Apliquem el filtre
+data = data[data['Income'] <= upper_bound_inc]
+
+
+
+
 # --- 3. GUARDAR DADES PROCESSADES ---
 output_csv = 'dades_processades_completes.csv'
 data.to_csv(output_csv, index=False, sep=',')
@@ -124,8 +137,8 @@ print(f"\nCSV amb dades netes guardat: {output_csv}")
 
 # --- 4. PREPARACIÓ PEL CLUSTERING ---
 numerical_cols = [
-    'Income', 'Total_Spending', 'Family_Size', 'Seniority_Code',
-    'Education_Code', 'Marital_Status_Code', 'Age'
+    'Income', 'Total_Spending', 'Seniority_Code',
+    'Education_Code', 'Marital_Status_Code'
 ]
 
 X = data[numerical_cols].values
@@ -232,17 +245,62 @@ df_components = pd.DataFrame(
 print("\n--- Pesos del PCA ---")
 print(df_components)
 
-# --- 9. PERFILAT AUTOMÀTIC DELS CLÚSTERS ---
-print("\n--- 9. Identificació Automàtica de Segments ---")
+# --- 9. PERFILAT DETALLAT DELS CLÚSTERS ---
+print("\n--- 9. Identificació i Profiling Complet ---")
 
-# Assegurem tipus float per càlculs
-for col in numerical_cols:
-    data[col] = data[col].astype(float)
+# 1. Definim TOTES les columnes que volem analitzar
+# (Incloses les que NO han entrat al model, com els productes o la recència)
+profiling_cols = [
+    # Demogràfiques
+    'Income', 'Age', 'Family_Size', 'Seniority_Code', 
+    'Education_Code', 'Marital_Status_Code',
+    
+    # Comportament i Valor
+    'Total_Spending', 'Recency', 
+    
+    # Productes (El que volies veure)
+    'MntWines', 'MntFruits', 'MntMeatProducts', 
+    'MntFishProducts', 'MntSweetProducts', 'MntGoldProds',
+    
+    # Canals
+    'NumWebPurchases', 'NumCatalogPurchases', 
+    'NumStorePurchases', 'NumWebVisitsMonth'
+]
 
-# Taula resum
-cluster_summary = data.groupby('KMeans_Cluster')[numerical_cols].mean().round(2)
-print(cluster_summary)
+# 2. FILTRE DE SEGURETAT (La correcció de l'error)
+# Seleccionem només les columnes que realment existeixen al DataFrame
+existing_cols = [col for col in profiling_cols if col in data.columns]
 
+# --- PAS CLAU: Convertim tot a números (float) ---
+# Això evita l'error "category dtype does not support aggregation"
+for col in existing_cols:
+    try:
+        data[col] = data[col].astype(float)
+    except ValueError:
+        print(f"Alerta: La columna {col} no s'ha pogut convertir a número i s'ignorarà.")
+        existing_cols.remove(col)
 
+# 3. Funció per imprimir el perfil transposat (més fàcil de llegir)
+def print_cluster_profile(cluster_col_name, method_name):
+    if cluster_col_name not in data.columns:
+        return # Si el clúster no existeix, no fem res
 
+    print(f"\n{'='*70}")
+    print(f"📊  PERFIL COMPLET: {method_name.upper()}")
+    print(f"{'='*70}")
+    
+    # Agrupem per clúster i calculem la mitjana
+    # Com que ja hem forçat 'astype(float)' a dalt, això ja no fallarà
+    summary = data.groupby(cluster_col_name)[existing_cols].mean().round(2)
+    
+    # Afegim el recompte de clients (quants n'hi ha a cada grup)
+    summary['Count (Clients)'] = data[cluster_col_name].value_counts()
+    
+    # Transposem (.T) perquè les variables quedin a l'esquerra i els clústers a dalt
+    print(summary.T)
 
+print_cluster_profile('KMeans_Cluster', 'K-Means')
+
+print_cluster_profile('Hierarchical_Cluster', 'Jeràrquic')
+
+print_cluster_profile('GMM_Cluster', 'GMM')
