@@ -143,71 +143,143 @@ visualizer.show(outpath=os.path.join(folder, f'00_elbow_kmeans.png'))
 plt.close()
 
 # ==============================================================================
-# 4. ANÀLISI D'IMPORTÀNCIA AMB XGBOOST
+# ANÀLISI D'IMPORTÀNCIA AMB XGBOOST (SUPERVISAT - VERSIÓ CORRECTA)
 # ==============================================================================
-print("\n--- 3. Entrenament XGBoost per Feature Selection ---")
+print("\n--- 3. Entrenament XGBoost per Feature Selection (SUPERVISAT) ---")
 
-def get_xgboost_importance(X_input, column_names, scaler_name, optimal_k):
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.inspection import permutation_importance
+
+def get_xgboost_importance_supervised(data_df, target_var='Total_Spending', scaler_name='standard'):
     """
-    Calcula la importància de features mitjançant XGBoost amb pseudo-labeling:
-    1. Escala les dades
-    2. Crea clusters temporals (KMeans) com a target
-    3. Entrena XGBoost per predir aquests clusters
-    4. Extreu les importàncies de features
+    Calcula importància de features amb XGBoost SUPERVISAT
+    
+    Args:
+        data_df: DataFrame amb totes les variables
+        target_var: Variable objectiu a predir (per defecte Total_Spending)
+        scaler_name: 'standard' o 'minmax'
+    
+    Returns:
+        df_imp: DataFrame amb importàncies ordenades
+        model: Model XGBoost entrenat
+        r2: Score R² del model (qualitat de la predicció)
     """
+    # Variables predictores (SENSE el target!)
+    feature_cols = [
+        'Income', 'MntWines', 'MntMeatProducts', 'MntFishProducts',
+        'MntFruits', 'MntSweetProducts', 'MntGoldProds',
+        'Wine_Ratio', 'Meat_Ratio', 'Sweet_Ratio', 
+        'Fish_Ratio', 'Fruit_Ratio', 'Gold_Ratio',
+        'Tenure_Days', 'Family_Size', 'Age'
+    ]
+    
+    # IMPORTANT: Si el target està a la llista de features, el treiem!
+    if target_var in feature_cols:
+        feature_cols.remove(target_var)
+    
+    X = data_df[feature_cols].values
+    y = data_df[target_var].values
+    
+    # Escalar dades
     scaler = MinMaxScaler() if scaler_name == 'minmax' else StandardScaler()
-    X_scaled = scaler.fit_transform(X_input)
+    X_scaled = scaler.fit_transform(X)
     
-    # Pseudo-labeling: Clusters com a target artificial
-    kmeans_base = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
-    y_pseudo = kmeans_base.fit_predict(X_scaled)
-    
-    # Entrenar XGBoost
-    model = XGBClassifier(
-        n_estimators=100, 
-        random_state=42,
-        eval_metric='mlogloss',
-        use_label_encoder=False
+    # Split train/test per validar el model
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42
     )
-    model.fit(X_scaled, y_pseudo)
     
-    # Extreure importàncies
-    importances = model.feature_importances_
+    # Entrenar XGBoost REGRESSOR (no Classifier!)
+    model = XGBRegressor(
+        n_estimators=100,
+        max_depth=6,
+        learning_rate=0.1,
+        random_state=42,
+        objective='reg:squarederror'
+    )
+    model.fit(X_train, y_train)
+    
+    # Avaluar model
+    y_pred = model.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    
+    print(f"    Model amb {scaler_name} scaler:")
+    print(f"      R² Score: {r2:.4f}")
+    print(f"      RMSE: {rmse:.2f}")
+    
+    result = permutation_importance(model, X_test, y_test, n_repeats=10, random_state=42)
+    importances = result.importances_mean
+    
+    # Obtenir importàncies
+    #importances = model.feature_importances_
     df_imp = pd.DataFrame({
-        'Feature': column_names,
+        'Feature': feature_cols,
         'Importance': importances
     }).sort_values(by='Importance', ascending=False)
     
-    return df_imp, model
+    return df_imp, model, r2
 
-# Calcular importàncies per ambdós scalers
-print("  Calculant importàncies (Standard Scaler)...")
-imp_standard, model_std = get_xgboost_importance(X, cols, 'standard', optimal_k)
+# Calcular importàncies amb ambdós scalers
+print("\n  Calculant importàncies (Standard Scaler)...")
+imp_standard, model_std, r2_std = get_xgboost_importance_supervised(
+    data, target_var='Total_Spending', scaler_name='standard'
+)
 
-print("  Calculant importàncies (MinMax Scaler)...")
-imp_minmax, model_mm = get_xgboost_importance(X, cols, 'minmax', optimal_k)
+print("\n  Calculant importàncies (MinMax Scaler)...")
+imp_minmax, model_mm, r2_mm = get_xgboost_importance_supervised(
+    data, target_var='Total_Spending', scaler_name='minmax'
+)
 
 # Guardar informes
-txt_path = os.path.join(folder, 'resultats_xgboost_importance.txt')
+txt_path = os.path.join(folder, 'resultats_xgboost_importance_SUPERVISED.txt')
 with open(txt_path, 'w', encoding='utf-8') as f:
-    f.write(f"INFORME: XGBOOST FEATURE IMPORTANCE (Pseudo-Labeling K={optimal_k})\n")
-    f.write("=========================================================\n\n")
+    f.write("INFORME: XGBOOST FEATURE IMPORTANCE (SUPERVISAT - Predint Total_Spending)\n")
+    f.write("="*80 + "\n\n")
+    f.write("DIFERÈNCIA AMB L'ANTERIOR:\n")
+    f.write("  - ABANS: Pseudo-labeling amb clusters artificials de KMeans\n")
+    f.write("  - ARA: Predicció supervisada de Total_Spending (variable real)\n\n")
+    f.write(f"MODEL QUALITY:\n")
+    f.write(f"  - Standard Scaler R²: {r2_std:.4f}\n")
+    f.write(f"  - MinMax Scaler R²: {r2_mm:.4f}\n\n")
+    f.write("="*80 + "\n\n")
     f.write("RÀNQUING (Standard Scaler):\n")
     f.write(imp_standard.to_string(index=False))
     f.write("\n\n")
     f.write("RÀNQUING (MinMax Scaler):\n")
     f.write(imp_minmax.to_string(index=False))
+    f.write("\n\n")
+    f.write("="*80 + "\n")
+    f.write("INTERPRETACIÓ:\n")
+    f.write("Les variables amb més importància són les que millor predeixen Total_Spending.\n")
+    f.write("Aquestes són bones candidates per al clustering, ja que capturen patrons\n")
+    f.write("rellevants del comportament de compra dels clients.\n")
 
-# Gràfic d'importància
-plt.figure(figsize=(10, 6))
-sns.barplot(data=imp_standard, x='Importance', y='Feature', palette='viridis')
-plt.title('XGBoost Feature Importance (Standard Scaler)')
+# Gràfics comparatius
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+# Standard Scaler
+sns.barplot(data=imp_standard, x='Importance', y='Feature', 
+            palette='viridis', ax=axes[0])
+axes[0].set_title(f'XGBoost Feature Importance (Standard Scaler)\nR² = {r2_std:.4f}')
+axes[0].set_xlabel('Importance')
+
+# MinMax Scaler
+sns.barplot(data=imp_minmax, x='Importance', y='Feature', 
+            palette='plasma', ax=axes[1])
+axes[1].set_title(f'XGBoost Feature Importance (MinMax Scaler)\nR² = {r2_mm:.4f}')
+axes[1].set_xlabel('Importance')
+
 plt.tight_layout()
-plt.savefig(os.path.join(folder, 'xgboost_feature_importance.png'))
+plt.savefig(os.path.join(folder, 'xgboost_feature_importance_SUPERVISED.png'), dpi=150)
 plt.close()
 
-print(f"  Informes guardats a {folder}")
-
+print(f"\n  ✓ Informes guardats a {folder}")
+print(f"  ✓ Les variables més importants per predir Total_Spending són:")
+for i, row in imp_standard.head(5).iterrows():
+    print(f"      {i+1}. {row['Feature']: <20} (importance: {row['Importance']:.4f})")
 # ==============================================================================
 # 5. AVALUACIÓ CLUSTERING AMB LLINDARS XGBOOST
 # ==============================================================================
@@ -233,10 +305,12 @@ def evaluate_xgboost_thresholds(X_original, column_names, imp_df_std, imp_df_min
         
         for th in thresholds:
             # Seleccionar variables amb importància >= threshold
-            selected_vars = current_imp_df[current_imp_df['Importance'] >= th]['Feature'].tolist()
+            selected_vars =current_imp_df[current_imp_df['Importance'] >= th]['Feature'].tolist()
             
-            if len(selected_vars) < 2:
-                continue
+            # 2. ENFORCE MINIMUM 4 VARIABLES
+            # Si en tenim menys de 4, agafem les top 4 del ranking, independentment del threshold
+            if len(selected_vars) <4:
+                selected_vars = current_imp_df.head(4)['Feature'].tolist()
             
             selected_indices = [column_names.index(v) for v in selected_vars]
             X_subset = X_scaled_global[:, selected_indices]
@@ -359,7 +433,7 @@ def get_best_result(df_results, method_name, metric_name, better='higher'):
     if df_results.empty:
         return None
     
-    df_filtered = df_results[df_results['num_vars'] >= 2]
+    df_filtered = df_results[df_results['num_vars'] >= 4]
     if df_filtered.empty:
         return None
     
