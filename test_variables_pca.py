@@ -10,9 +10,12 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering, SpectralClustering
 from sklearn.mixture import GaussianMixture
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, pairwise_distances # Afegit pairwise_distances
 from sklearn.manifold import TSNE
 from yellowbrick.cluster import KElbowVisualizer
+from scipy.spatial.distance import cdist # Afegit
+from scipy.stats import pearsonr # Afegit
+
 # ==============================================================================
 # 0. CONFIGURACIÓ INICIAL
 # ==============================================================================
@@ -32,6 +35,142 @@ os.makedirs(output_folder)
 print(f"Carpeta '{output_folder}' preparada.")
 
 txt_output_path = os.path.join(output_folder, 'resultats_pca_clustering_detallats.txt')
+
+# ==============================================================================
+# FUNCIONS PER AL PERFIL DE CLÚSTERS I MÈTRIQUES
+# ==============================================================================
+
+def calculate_extra_metrics(X_subset, labels):
+    """
+    Calcula mètriques adicionals de qualitat del clustering:
+    - SSE Normalitzat: Cohesió intra-cluster
+    - BSS Normalitzat: Separació inter-cluster
+    - Correlació Pearson: Relació incidència-proximitat
+    """
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return np.nan, np.nan, np.nan
+
+    # SSE (Within-cluster Sum of Squares)
+    sse = 0
+    centers = np.array([X_subset[labels == i].mean(axis=0) for i in unique_labels])
+    for i, label in enumerate(unique_labels):
+        cluster_points = X_subset[labels == label]
+        if len(cluster_points) > 0:
+            sse += np.sum(cdist(cluster_points, [centers[i]])**2)
+
+    # SST (Total Sum of Squares)
+    global_mean = X_subset.mean(axis=0)
+    sst = np.sum((X_subset - global_mean)**2)
+    
+    # BSS (Between-cluster Sum of Squares)
+    bss = sst - sse
+    
+    # Normalitzar per SST (Només si SST > 0)
+    sse_norm = sse / sst if sst > 1e-6 else np.nan
+    bss_norm = bss / sst if sst > 1e-6 else np.nan
+    
+    # Correlació (mostra si punts propers estan al mateix cluster)
+    idx = np.random.choice(len(X_subset), min(len(X_subset), 1000), replace=False)
+    X_sample = X_subset[idx]
+    labels_sample = labels[idx]
+    
+    if len(X_sample) < 2:
+        corr = np.nan
+    else:
+        incidence_matrix = (labels_sample[:, None] == labels_sample[None, :]).astype(int)
+        dist_matrix = pairwise_distances(X_sample)
+        
+        if incidence_matrix.flatten().shape[0] > 1:
+            corr, _ = pearsonr(incidence_matrix.flatten(), dist_matrix.flatten())
+        else:
+            corr = np.nan
+
+    return sse_norm, bss_norm, corr
+
+def print_and_save_cluster_profile_full(data_df, labels, case_name, out_folder, main_txt_path, extra_metrics):
+    """
+    Imprimeix i guarda perfil complet dels clústers amb mètriques de qualitat
+    També afegeix el perfil al TXT principal.
+    """
+    tmp = data_df.copy()
+    tmp['_CLUSTER_'] = labels
+
+    # Variables numèriques per perfil
+    num_cols = tmp.select_dtypes(include=[np.number]).columns.tolist()
+    # Excloem només la columna de clúster generada
+    exclude_cols = ['_CLUSTER_']
+    num_cols = [c for c in num_cols if c not in exclude_cols]
+
+    # Recalculate summary only on the relevant numerical columns
+    summary = tmp.groupby('_CLUSTER_')[num_cols].mean().round(2)
+    counts = tmp['_CLUSTER_'].value_counts().sort_index()
+    
+    # Align counts with summary index, fill missing if any cluster is empty
+    counts = counts.reindex(summary.index, fill_value=0) 
+    summary['Count (Clients)'] = counts.values
+
+    sse_n, bss_n, corr = extra_metrics
+
+    # Header amb mètriques
+    metrics_header = (
+        f"\n\n\n{'='*90}\n"
+        f"📊 PERFIL COMPLET: {case_name}\n"
+        f"{'-'*90}\n"
+        f"   >> BSS (Separació) Norm: {bss_n:.2%}  (Més alt millor)\n"
+        f"   >> SSE (Cohesió) Norm:   {sse_n:.2%}  (Més baix millor)\n"
+        f"   >> Correlació (Pearson): {corr:.4f}   (Més a prop de -1 millor)\n"
+        f"{'='*90}"
+    )
+
+    print(metrics_header)
+    print(summary.T)
+
+    # Guardar arxius
+    safe_name = case_name.lower().replace(" ", "_").replace("/", "_").replace("|", "")
+    csv_path = os.path.join(out_folder, f'perfil_clusters_{safe_name}.csv')
+    
+    # Save the full profile to its own CSV/TSV
+    summary.T.to_csv(csv_path, sep='\t')
+
+    # Append to the main TXT file
+    with open(main_txt_path, "a", encoding="utf-8") as f:
+        f.write(metrics_header + "\n\n")
+        f.write(summary.T.to_string())
+        f.write("\n")
+
+    print(f"   -> Guardat perfil a: {csv_path}")
+    print(f"   -> Afegit perfil al TXT principal: {main_txt_path}")
+
+def build_labels_and_metrics_for_best_config(X_original, column_names, best_config, 
+                                             method_name, optimal_pca_dict):
+    """
+    Reprodueix la millor configuració, calcula labels i mètriques extra.
+    """
+    scaler = MinMaxScaler() if best_config['scaler'] == 'minmax' else StandardScaler()
+    X_scaled_full = scaler.fit_transform(X_original)
+    
+    # Seleccionar variables segons threshold amb components òptims
+    n_pca_comps = optimal_pca_dict.get(best_config['scaler'], 4)
+    pca_temp = PCA(n_components=n_pca_comps)
+    pca_temp.fit(X_scaled_full)
+    loadings_abs = np.abs(pca_temp.components_)
+    max_loading = np.max(loadings_abs, axis=0)
+    selected_indices = np.where(max_loading >= best_config['threshold'])[0]
+    
+    if len(selected_indices) == 0:
+        return None, None
+
+    X_subset = X_scaled_full[:, selected_indices]
+    
+    # Aplicar clustering
+    labels = apply_clustering(X_subset, method_name, k_clusters=int(best_config['k_clusters']))
+    
+    # Calcular mètriques
+    extra_metrics = calculate_extra_metrics(X_subset, labels)
+    
+    return labels, extra_metrics
+
 
 # ==============================================================================
 # 1. CÀRREGA I NETEJA DE DADES
@@ -242,13 +381,13 @@ def run_pca_analysis(X_input, scaler_name, n_components, column_names, file_hand
         file_handle.write(f"\n>> {pc} ({pca.explained_variance_ratio_[i]*100:.2f}%):\n")
         for vname, val in top.items():
             real_val = comps_df.loc[vname, pc]
-            file_handle.write(f"   - {vname:20} : {real_val:+.4f}\n")
+            file_handle.write(f"  - {vname:20} : {real_val:+.4f}\n")
 
 # ==============================================================================
 # 6. AVALUACIÓ CLUSTERING AMB DIFERENTS LLINDARS
 # ==============================================================================
 def evaluate_thresholds(X_original, column_names, clustering_method='kmeans', 
-                       optimal_k_dict=None, optimal_pca_dict=None):
+                        optimal_k_dict=None, optimal_pca_dict=None):
     """
     Avalua diferents llindars de selecció de variables amb diversos mètodes de clustering.
     Utilitza els valors òptims de K i components PCA calculats prèviament.
@@ -307,7 +446,7 @@ def evaluate_thresholds(X_original, column_names, clustering_method='kmeans',
                         
                 elif clustering_method == 'spectral':
                     model = SpectralClustering(n_clusters=k_clusters, random_state=42, 
-                                              affinity='nearest_neighbors')
+                                               affinity='nearest_neighbors')
                     labels = model.fit_predict(X_subset)
                 
                 # Calcular silhouette score
@@ -326,7 +465,7 @@ def evaluate_thresholds(X_original, column_names, clustering_method='kmeans',
                 })
                 
             except Exception as e:
-                print(f"  Warning [{clustering_method}]: Error amb threshold={th}, scaler={scaler_name}")
+                print(f"  Warning [{clustering_method}]: Error amb threshold={th}, scaler={scaler_name}. Error: {e}")
                 continue
             
     return pd.DataFrame(results)
@@ -433,7 +572,7 @@ def visualize_best_clustering(X_original, column_names, best_config, method_name
     X_pca = pca_viz.fit_transform(X_subset)
     
     scatter = plt.scatter(X_pca[:, 0], X_pca[:, 1], c=labels, cmap='viridis', 
-                         alpha=0.6, edgecolors='k', linewidth=0.5)
+                          alpha=0.6, edgecolors='k', linewidth=0.5)
     plt.colorbar(scatter, label='Cluster')
     plt.xlabel(f'PC1 ({pca_viz.explained_variance_ratio_[0]*100:.1f}%)')
     plt.ylabel(f'PC2 ({pca_viz.explained_variance_ratio_[1]*100:.1f}%)')
@@ -442,11 +581,12 @@ def visualize_best_clustering(X_original, column_names, best_config, method_name
     
     # t-SNE
     plt.subplot(1, 2, 2)
-    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    perp = min(30, len(X_subset) - 1)
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perp)
     X_tsne = tsne.fit_transform(X_subset)
     
     scatter = plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c=labels, cmap='viridis', 
-                         alpha=0.6, edgecolors='k', linewidth=0.5)
+                          alpha=0.6, edgecolors='k', linewidth=0.5)
     plt.colorbar(scatter, label='Cluster')
     plt.xlabel('t-SNE 1')
     plt.ylabel('t-SNE 2')
@@ -555,6 +695,51 @@ for method in clustering_methods:
     if best_config is not None:
         visualize_best_clustering(X, cols, best_config, method, optimal_pca_dict)
 
+# ==============================================================================
+# 8. PERFIL COMPLET DELS CLÚSTERS AMB MÈTRIQUES ADICIONALS (NOU)
+# ==============================================================================
+print("\n--- 8. Perfil complet dels clústers (millor cas per mètode) ---")
+
+for method in clustering_methods:
+    df_results = all_results[method]
+    # Usem un llindar mínim de 3 variables per consistència amb la funció get_best_result
+    best_config = get_best_result(df_results, method, min_vars=3) 
+
+    if best_config is None:
+        print(f"  ⚠️ Sense millor configuració per {method.upper()}.")
+        continue
+
+    # Calculem labels i mètriques extra
+    best_labels, extra_metrics = build_labels_and_metrics_for_best_config(
+        X_original=X,
+        column_names=cols,
+        best_config=best_config,
+        method_name=method,
+        optimal_pca_dict=optimal_pca_dict
+    )
+    
+    # Comprovem la validesa de les mètriques (SSE/BSS)
+    if best_labels is None or extra_metrics is None or np.isnan(extra_metrics[0]):
+        print(f"  ⚠️ Error/Mètriques invàlides recalculant labels/mètriques per {method.upper()}.")
+        continue
+
+    case_name = (f"PCA BEST | {method.upper()} | "
+                f"scaler={best_config['scaler']} | "
+                f"th={best_config['threshold']} | k={int(best_config['k_clusters'])}")
+    
+    print_and_save_cluster_profile_full(
+        data, 
+        best_labels, 
+        case_name, 
+        output_folder, 
+        txt_output_path, 
+        extra_metrics
+    )
+
+
+# ==============================================================================
+# 9. RESUM FINAL
+# ==============================================================================
 print("\n" + "="*60)
 print("PROCÉS COMPLETAT!")
 print("="*60)
@@ -562,7 +747,8 @@ print(f"\nResultats guardats a la carpeta: '{output_folder}/'")
 print("\nArxius generats:")
 print("  - Informes PCA detallats (TXT)")
 print("  - Scree plots i Elbow plots (PNG)")
-print("  - 5 gràfics de comparativa Silhouette (PNG)")
-print("  - 5 visualitzacions PCA+t-SNE dels millors resultats (PNG)")
-print("  - CSVs amb avaluacions detallades per cada mètode")
+print("  - 4 gràfics de comparativa Silhouette (PNG)")
+print("  - 4 visualitzacions PCA+t-SNE dels millors resultats (PNG)")
+print("  - 4 perfils complets dels clústers amb mètriques (CSV)")
+print("  - Avaluacions detallades per cada mètode (CSV)")
 print("="*60)

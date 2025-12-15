@@ -10,10 +10,12 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering, SpectralClustering
 from sklearn.mixture import GaussianMixture
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, pairwise_distances
 from sklearn.manifold import TSNE
 from sklearn.neighbors import kneighbors_graph
 from yellowbrick.cluster import KElbowVisualizer
+from scipy.spatial.distance import cdist
+from scipy.stats import pearsonr
 
 # ==============================================================================
 # CONFIGURACIÓ INICIAL
@@ -143,12 +145,6 @@ print("\n--- 3. Càlcul de Laplacian Score Feature Importance ---")
 def calculate_laplacian_importance(X_input, column_names, scaler_name, k_neighbors=10):
     """
     Calcula la importància de cada variable basant-se en el Laplacian Score.
-    
-    El Laplacian Score mesura la "suavitat" d'una variable sobre el graf de veïns:
-    - Score baix = variable suau (bona per clustering)
-    - Score alt = variable sorollosa (menys útil)
-    
-    Retornem la importància invertida (alt = bo).
     """
     # Escalat de dades
     scaler = MinMaxScaler() if scaler_name == 'minmax' else StandardScaler()
@@ -267,7 +263,7 @@ def evaluate_thresholds(X_original, column_names, imp_df_std, imp_df_minmax, k_c
                     model = AgglomerativeClustering(n_clusters=k_clusters)
                 elif method == 'spectral':
                     model = SpectralClustering(n_clusters=k_clusters, random_state=42, 
-                                              affinity='nearest_neighbors')
+                                               affinity='nearest_neighbors')
                 
                 labels = model.fit_predict(X_subset)
                 
@@ -366,7 +362,7 @@ def apply_clustering(X_subset, method, k_clusters):
         model = AgglomerativeClustering(n_clusters=k_clusters)
     elif method == 'spectral':
         model = SpectralClustering(n_clusters=k_clusters, random_state=42, 
-                                  affinity='nearest_neighbors')
+                                   affinity='nearest_neighbors')
     
     return model.fit_predict(X_subset)
 
@@ -436,56 +432,169 @@ def visualize_best(X_original, column_names, best_config, method_name, imp_std, 
     return labels
 
 # Visualitzar millors resultats
-best_labels = {}
+best_configs = {}
 for method in clustering_methods:
     best_config = get_best_result(all_results[method], method)
-    labels = visualize_best(X, cols, best_config, method, imp_standard, imp_minmax)
-    if labels is not None:
-        best_labels[method] = labels
+    best_configs[method] = best_config
+    visualize_best(X, cols, best_config, method, imp_standard, imp_minmax)
+
 
 # ==============================================================================
-# 8. PERFIL COMPLET DELS CLÚSTERS
+# 8. PERFIL COMPLET DELS CLÚSTERS AMB MÈTRIQUES ADICIONALS
 # ==============================================================================
-print("--- 7. Perfil dels Clústers ---\n")
+print("--- 7. Perfil complet dels clústers (millor cas per mètode) ---\n")
 
-def print_cluster_profile(data_df, labels, method_name):
-    """Imprimeix i guarda el perfil complet de cada clúster"""
+def calculate_extra_metrics(X_subset, labels):
+    """
+    Calcula mètriques adicionals de qualitat del clustering:
+    - SSE Normalitzat: Cohesió intra-cluster
+    - BSS Normalitzat: Separació inter-cluster
+    - Correlació Pearson: Relació incidència-proximitat
+    """
+    unique_labels = np.unique(labels)
+    centers = np.array([X_subset[labels == i].mean(axis=0) for i in unique_labels])
+    global_mean = X_subset.mean(axis=0)
+    
+    # SSE (Within-cluster Sum of Squares)
+    sse = 0
+    for i, label in enumerate(unique_labels):
+        cluster_points = X_subset[labels == label]
+        if len(cluster_points) > 0:
+            sse += np.sum(cdist(cluster_points, [centers[i]])**2)
+    
+    # SST (Total Sum of Squares)
+    sst = np.sum((X_subset - global_mean)**2)
+    
+    # BSS (Between-cluster Sum of Squares)
+    bss = sst - sse
+    
+    # Normalitzar per SST
+    sse_norm = sse / sst if sst > 1e-6 else 0
+    bss_norm = bss / sst if sst > 1e-6 else 0
+    
+    # Correlació (mostra si punts propers estan al mateix cluster)
+    if len(X_subset) < 2:
+        corr = 0.0
+    else:
+        idx = np.random.choice(len(X_subset), min(len(X_subset), 1000), replace=False)
+        X_sample = X_subset[idx]
+        labels_sample = labels[idx]
+        
+        incidence_matrix = (labels_sample[:, None] == labels_sample[None, :]).astype(int)
+        dist_matrix = pairwise_distances(X_sample)
+        
+        # Aplanar i calcular correlació
+        inc_flat = incidence_matrix.flatten()
+        dist_flat = dist_matrix.flatten()
+
+        # Filtrar per evitar NaN/Inf si hi ha variància zero
+        if np.all(inc_flat == inc_flat[0]) or np.all(dist_flat == dist_flat[0]):
+            corr = 0.0
+        else:
+            try:
+                corr, _ = pearsonr(inc_flat, dist_flat)
+            except ValueError:
+                corr = 0.0
+    
+    return sse_norm, bss_norm, corr
+
+def print_and_save_cluster_profile_full(data_df, labels, case_name, out_folder, extra_metrics):
+    """
+    Imprimeix i guarda perfil complet dels clústers amb mètriques de qualitat
+    """
     tmp = data_df.copy()
     tmp['_CLUSTER_'] = labels
-    
-    # Seleccionar només columnes numèriques
+
+    # Variables numèriques per perfil
     num_cols = tmp.select_dtypes(include=[np.number]).columns.tolist()
     num_cols = [c for c in num_cols if c != '_CLUSTER_']
-    
-    # Calcular estadístiques
+
     summary = tmp.groupby('_CLUSTER_')[num_cols].mean().round(2)
     counts = tmp['_CLUSTER_'].value_counts().sort_index()
-    summary['Count'] = counts.values
-    
-    # Imprimir
-    print("=" * 90)
-    print(f"📊 PERFIL CLÚSTERS: {method_name.upper()}")
-    print("=" * 90)
+    summary['Count (Clients)'] = counts.values
+
+    sse_n, bss_n, corr = extra_metrics
+
+    # Header amb mètriques
+    metrics_header = (
+        f"\n{'='*90}\n"
+        f"📊 PERFIL COMPLET: {case_name}\n"
+        f"{'-'*90}\n"
+        f"   >> BSS (Separació) Norm: {bss_n:.2%}  (Més alt millor)\n"
+        f"   >> SSE (Cohesió) Norm:   {sse_n:.2%}  (Més baix millor)\n"
+        f"   >> Correlació (Pearson): {corr:.4f}   (Més a prop de -1 millor)\n"
+        f"{'='*90}"
+    )
+
+    print(metrics_header)
     print(summary.T)
-    print()
-    
-    # Guardar
-    safe_name = method_name.lower().replace(" ", "_")
-    csv_path = os.path.join(OUTPUT_FOLDER, f'perfil_{safe_name}.csv')
-    txt_path = os.path.join(OUTPUT_FOLDER, f'perfil_{safe_name}.txt')
-    
+
+    # Guardar arxius
+    safe_name = case_name.lower().replace(" ", "_").replace("/", "_").replace("|", "")
+    csv_path = os.path.join(out_folder, f'perfil_clusters_{safe_name}.csv')
+    txt_path = os.path.join(out_folder, f'perfil_clusters_{safe_name}.txt')
+
     summary.T.to_csv(csv_path, sep='\t')
-    
+
     with open(txt_path, "w", encoding="utf-8") as f:
-        f.write("=" * 90 + "\n")
-        f.write(f"PERFIL CLÚSTERS: {method_name.upper()}\n")
-        f.write("=" * 90 + "\n\n")
+        f.write(metrics_header + "\n\n")
         f.write(summary.T.to_string())
         f.write("\n")
 
+    print(f"   -> Guardat: {csv_path}")
+    print(f"   -> Guardat: {txt_path}")
+
+def build_labels_and_metrics_for_best_config(X_original, column_names, best_config, 
+                                             method_name, k_clusters):
+    """
+    Reprodueix la millor configuració i calcula labels + mètriques
+    """
+    if best_config is None:
+        return None, None
+        
+    scaler = MinMaxScaler() if best_config['scaler'] == 'minmax' else StandardScaler()
+    X_scaled_full = scaler.fit_transform(X_original)
+
+    imp_df = imp_minmax if best_config['scaler'] == 'minmax' else imp_standard
+    selected_vars = imp_df[imp_df['Importance'] >= best_config['threshold']]['Feature'].tolist()
+    selected_indices = [column_names.index(v) for v in selected_vars]
+    
+    if len(selected_indices) == 0:
+        return None, None
+
+    X_subset = X_scaled_full[:, selected_indices]
+    labels = apply_clustering(X_subset, method_name, k_clusters=k_clusters)
+    extra_metrics = calculate_extra_metrics(X_subset, labels)
+    
+    return labels, extra_metrics
+
+
 # Generar perfils per cada mètode
-for method, labels in best_labels.items():
-    print_cluster_profile(data, labels, method)
+for method in clustering_methods:
+    best_config = best_configs[method]
+
+    if best_config is None:
+        print(f"  ⚠️ Sense millor configuració per {method.upper()}.")
+        continue
+
+    best_labels, extra_metrics = build_labels_and_metrics_for_best_config(
+        X_original=X,
+        column_names=cols,
+        best_config=best_config,
+        method_name=method,
+        k_clusters=optimal_k
+    )
+    
+    if best_labels is None:
+        print(f"  ⚠️ Error recalculant labels per {method.upper()}.")
+        continue
+
+    case_name = (f"LAPLACIAN BEST | {method.upper()} | "
+                f"scaler={best_config['scaler']} | "
+                f"th={best_config['threshold']} | k={optimal_k}")
+    
+    print_and_save_cluster_profile_full(data, best_labels, case_name, OUTPUT_FOLDER, extra_metrics)
+
 
 # ==============================================================================
 # RESUM FINAL
@@ -496,9 +605,9 @@ print("=" * 60)
 print(f"\nResultats guardats a: '{OUTPUT_FOLDER}/'")
 print("\nArxius generats:")
 print("  ✓ Elbow Method per K òptima")
-print("  ✓ Laplacian Score Feature Importance")
+print("  ✓ Laplacian Score Feature Importance (TXT + PNG)")
 print("  ✓ Avaluacions per cada mètode (CSV)")
-print("  ✓ Gràfics comparatius")
-print("  ✓ Visualitzacions PCA + t-SNE")
-print("  ✓ Perfils dels clústers (CSV + TXT)")
+print("  ✓ Gràfics comparatius (PNG)")
+print("  ✓ Visualitzacions PCA + t-SNE (PNG)")
+print("  ✓ Perfils complets dels clústers amb mètriques (CSV + TXT)")
 print("=" * 60)
